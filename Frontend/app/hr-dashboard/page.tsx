@@ -1,144 +1,244 @@
-// app/hr-dashboard/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useEffect, useState } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Users, TrendingUp, Building, FileText, Send, X } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
-import { fetchEmployees, sendFeedbackAPI, createPayrollIntent, markPayrollPaid } from "@/lib/hr";
-import { getMe, logout } from "@/lib/auth";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Users,
+  Send,
+  X,
+  Building,
+  FileText,
+} from "lucide-react";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+} from "recharts";
+import api from "@/lib/apiClient";
+import { auth } from "@/lib/firebaseClient";
+import jsPDF from "jspdf";
+import { generatePayslip } from "@/lib/generatePayslip";
 
-const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6"];
 
-function useAuthGuard() {
-  useEffect(() => {
-    const me = localStorage.getItem("me");
-    if (!me) window.location.href = "/";
-    else {
-      const role = JSON.parse(me).role;
-      if (!(role === "hr" || role === "admin")) window.location.href = "/employee-dashboard";
-    }
-  }, []);
-}
+const COLORS = [
+  "#3b82f6", "#10b981", "#f59e0b", "#ef4444",
+  "#8b5cf6", "#ec4899", "#14b8a6",
+];
 
 export default function HRDashboard() {
-  useAuthGuard();
-
-  const [me, setMe] = useState<any>(null);
+  const [userLoaded, setUserLoaded] = useState(false);
+  const [hrData, setHrData] = useState<any>(null);
+  const [employeeData, setEmployeeData] = useState(null)
   const [employees, setEmployees] = useState<any[]>([]);
-  const [loadingEmp, setLoadingEmp] = useState(true);
-
-  const [selectedEmployee, setSelectedEmployee] = useState<any | null>(null);
+  const [departments, setDepartments] = useState<any[]>([]);
+  const [deptBudgets, setDeptBudgets] = useState<{ [key: string]: number }>({});
+  const [performanceData, setPerformanceData] = useState<any[]>([]);
+  const [selectedEmployee, setSelectedEmployee] = useState<any>(null);
   const [feedback, setFeedback] = useState("");
-  const [sentFeedback, setSentFeedback] = useState<{ employeeName: string; feedback: string; date: string }[]>([]);
+  const [payrollStatus, setPayrollStatus] = useState<{ [key: string]: string }>({});
+  const [payrollData, setPayrollData] = useState<any[]>([]);
+  const [sentFeedback, setSentFeedback] = useState<any[]>([]);
+  const [showPerformance, setShowPerformance] = useState(false);
+  const [showPerformanceMap, setShowPerformanceMap] = useState<{ [key: string]: boolean }>({});
 
-  const [payrollStatus, setPayrollStatus] = useState<{ [id: string]: "idle" | "processing" | "paid" | "failed" }>({});
-
+  
   useEffect(() => {
-    (async () => {
-      const m = await getMe();
-      setMe(m);
-      try {
-        const list = await fetchEmployees();
-        setEmployees(list);
-      } finally {
-        setLoadingEmp(false);
+    // Listen for Firebase auth changes
+    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+      if (!user) {
+        console.log("No user logged in, redirecting...");
+        window.location.href = "/";
+        return;
       }
-    })();
+      console.log("Current user:", user);
+      await fetchDashboardData();
+      setUserLoaded(true);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  // Build departments distribution dynamically
-  const departmentsAgg = useMemo(() => {
-    const acc: Record<string, number> = {};
-    employees.forEach((e) => {
-      const d = e.department || "Unassigned";
-      acc[d] = (acc[d] || 0) + 1;
-    });
-    return Object.entries(acc).map(([name, count]) => ({
-      name,
-      count,
-      budget: 0, // not in backend; display-only
-    }));
-  }, [employees]);
-
-  // Fake performance per department = average of employee salary percentile
-  const departmentPerformance = useMemo(() => {
-    const acc: Record<string, { total: number; c: number }> = {};
-    const salaries = employees.map((e) => e.salary || 0);
-    const max = Math.max(1, ...salaries);
-    employees.forEach((e) => {
-      const d = e.department || "Unassigned";
-      const score = Math.round(((e.salary || 0) / max) * 100);
-      acc[d] = acc[d] || { total: 0, c: 0 };
-      acc[d].total += score;
-      acc[d].c += 1;
-    });
-    return Object.entries(acc).map(([department, v]) => ({
-      department,
-      performance: Math.round(v.total / v.c || 0),
-    }));
-  }, [employees]);
-
-  const handlePaySalary = async (employee: any) => {
-    const { _id, employeeId, salary = 0 } = employee;
-    setPayrollStatus((s) => ({ ...s, [employee._id]: "processing" }));
+  const fetchDashboardData = async () => {
     try {
-      const month = new Date().toLocaleString("en-IN", { month: "long", year: "numeric" }); // e.g. "August 2025"
-      const intent = await createPayrollIntent({ employeeId, amount: salary, month });
-      // if you integrate Stripe on FE, confirm card here; for now, mark paid immediately
-      await markPayrollPaid(intent.paymentIntentId);
-      setPayrollStatus((s) => ({ ...s, [employee._id]: "paid" }));
-    } catch (e) {
-      console.error(e);
-      setPayrollStatus((s) => ({ ...s, [employee._id]: "failed" }));
-    }
+      // HR profile
+     // Employee profile
+           const profileRes = await api.get("/api/users/me")
+           const profile = profileRes.data
+           setHrData(profile)
+
+      // Employees
+      const empRes = await api.get("/api/users/all");
+const users = empRes.data;
+setEmployees(users);
+
+      // Performance
+      const perfRes = await api.get("/api/performances");
+      const allPerf = perfRes.data;
+
+      const employeesWithPerf = users.map((u: any) => ({
+        ...u,
+        performance: allPerf
+          .filter((p: any) => p.user._id === u._id)
+          .map((p: any) => ({
+            month: p.period,
+            productivity: p.score || 0,
+            goals: p.notes ? 100 : 0,
+          }))
+          .reverse(),
+      }));
+      setEmployees(employeesWithPerf);
+
+  // Departments
+const deptRes = await api.get("/api/departments");
+const depts = deptRes.data.map((d: any) => ({
+  ...d,
+  count: users.filter((e: any) => e.department === d.name).length,
+  budget: d.budget || 0,
+}));
+setDepartments(depts);
+
+const budgets: { [key: string]: number } = {};
+depts.forEach((d) => {
+  budgets[d._id] = d.budget || 0;
+});
+setDeptBudgets(budgets);
+
+      // Employee dashboard payroll fetch
+const payrollRes = await api.get("/api/payroll");
+setPayrollData(payrollRes.data); // only that employee’s payroll info
+
+
+      // Feedback
+      const fbRes = await api.get("/api/feedbacks");
+  setSentFeedback(
+    fbRes.data.map((f: any) => ({
+      employeeName: f.user?.name || "-",
+      message: f.message,
+      date: new Date(f.createdAt || f.date).toISOString().slice(0, 10),
+      senderRole: f.senderRole,
+    }))
+  );
+} catch (err) {
+  console.error("Error fetching HR feedback:", err);
+}
   };
+
+  // Pay salary
+const handlePaySalary = async (payrollId: string) => {
+  try {
+    await api.patch(`/api/payroll/${payrollId}/pay`);
+    setPayrollData((prev) =>
+      prev.map((p) =>
+        p._id === payrollId ? { ...p, status: "paid" } : p
+      )
+    );
+  } catch (err) {
+    console.error("Error paying salary:", err);
+  }
+};
+
 
   const submitFeedback = async () => {
-    if (!selectedEmployee || !feedback) return;
-    try {
-      await sendFeedbackAPI({
-        employeeId: selectedEmployee.employeeId,
-        feedback,
-        fromUserId: me?.employeeId,
-      });
-      setSentFeedback((prev) => [
-        { employeeName: selectedEmployee.name, feedback, date: new Date().toLocaleDateString() },
-        ...prev,
-      ]);
-      setFeedback("");
-      setSelectedEmployee(null);
-    } catch (err: any) {
-      alert(err?.response?.data?.message || "Failed to send feedback");
-    }
+  if (!selectedEmployee || !feedback) return;
+  try {
+    await api.post("/api/feedbacks", {
+      userId: selectedEmployee._id,
+      message: feedback,
+    });
+
+    setSentFeedback((prev) => [
+      {
+        employeeName: selectedEmployee.name,
+        message: feedback,
+        createdAt: new Date().toISOString(), // ✅ always use createdAt
+      },
+      ...prev,
+    ]);
+
+    setFeedback("");
+    setSelectedEmployee(null);
+  } catch (err) {
+    console.error("Failed to submit feedback:", err);
+  }
+};
+
+  const togglePerformance = (empId: string) => {
+  setShowPerformanceMap((prev) => ({ ...prev, [empId]: !prev[empId] }));
+};
+
+  const handleLogout = async () => {
+    await auth.signOut();
+    window.location.href = "/";
   };
+
+  if (!userLoaded) return <p>Loading HR dashboard...</p>;
+
+  // Compute average performance per department
+  const deptPerformance = departments.map((d) => {
+    const deptScores = employees
+      .filter((e) => e.department === d.name)
+      .flatMap((e) => e.performance?.map((p: any) => p.productivity) || []);
+    const avgPerf = deptScores.length
+      ? deptScores.reduce((a, b) => a + b, 0) / deptScores.length
+      : 0;
+    return { department: d.name, performance: avgPerf };
+  });
+
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
+        <h1 className="text-3xl font-bold text-red-600 p-4">
+      HR Dashboard Loaded ✅
+    </h1>
+      {/* ✅ Header */}
       <header className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-4">
             <div className="flex items-center">
               <Users className="h-8 w-8 text-blue-600" />
               <div className="ml-3">
-                <h1 className="text-2xl font-bold text-gray-900">HR Dashboard</h1>
-                <p className="text-sm text-gray-500">{me?.name} {me?.role ? `• ${me.role}` : ""}</p>
+                <h1 className="text-2xl font-bold text-gray-900">
+                  {hrData?.dashboardTitle || "HR Dashboard"}
+                </h1>
+                <p className="text-sm text-gray-500">
+                  {hrData?.name || "Shweta Kadam"}
+                  {hrData?.role ? ` • ${hrData.role}` : ""}
+                </p>
               </div>
             </div>
-            <Button variant="outline" onClick={() => { logout(); window.location.href = "/"; }}>
+            <Button variant="outline" onClick={handleLogout}>
               Logout
             </Button>
           </div>
         </div>
       </header>
 
+      {/* ✅ Tabs Section */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <Tabs defaultValue="overview" className="space-y-6">
           <TabsList className="grid w-full grid-cols-5">
@@ -149,92 +249,121 @@ export default function HRDashboard() {
             <TabsTrigger value="feedback">Feedback</TabsTrigger>
           </TabsList>
 
-          {/* Overview */}
+          {/* ✅ Overview Tab */}
           <TabsContent value="overview" className="space-y-6">
-            <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
-              <CardHeader>
-                <CardTitle>HR Profile</CardTitle>
-                <CardDescription>Your HR details</CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-2 gap-4">
-                {Object.entries({
-                  "HR ID": me?.employeeId || "HR001",
-                  "Full Name": me?.name || "-",
-                  Role: me?.role || "-",
-                  Email: me?.email || "-",
-                  Department: me?.department || "Human Resources",
-                  "Join Date": "-", // not available in backend model by default
-                }).map(([label, value], idx) => (
-                  <div key={idx}>
-                    <Label className="text-sm font-medium text-muted-foreground">{label}</Label>
-                    <p className="text-lg font-semibold">{value as any}</p>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+          {/* HR Profile */}
+  <Card className="bg-white shadow-lg hover:shadow-xl transition">
+    <CardHeader>
+      <CardTitle>HR Profile</CardTitle>
+      <CardDescription>Your details</CardDescription>
+    </CardHeader>
+    <CardContent className="grid grid-cols-2 gap-4">
+      {Object.entries({
+        "Employee ID":  "123emp",
+        "Full Name": hrData?.name,
+        "Role": hrData?.role,
+        "Department":"Human Resources",
+        "Email": hrData?.email,
+        "Join Date": "2025-09-07",
+      }).map(([label, value], idx) => (
+        <div key={idx}>
+          <Label className="text-sm font-medium text-muted-foreground">{label}</Label>
+          <p className="text-lg font-semibold">{value}</p>
+        </div>
+      ))}
+    </CardContent>
+  </Card>
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
               <Card className="bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">Total Employees</CardTitle>
-                  <Users className="h-4 w-4 text-white/80" />
+                <CardHeader>
+                  <CardTitle>Total Employees</CardTitle>
+                  <CardDescription className="text-blue-100">
+                    Company-wide
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{loadingEmp ? "…" : employees.length}</div>
-                  <p className="text-xs opacity-80">Active employees</p>
+                  <p className="text-3xl font-bold">{employees.length}</p>
                 </CardContent>
               </Card>
 
               <Card className="bg-gradient-to-r from-green-500 to-emerald-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">Monthly Payroll</CardTitle>
-                  <span className="text-white/80 font-bold">₹</span>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    ₹{(employees || []).reduce((a, e) => a + (e.salary || 0), 0).toLocaleString()}
-                  </div>
-                  <p className="text-xs opacity-80">This month</p>
-                </CardContent>
-              </Card>
+  <CardHeader>
+    <CardTitle>Monthly Payroll</CardTitle>
+    <CardDescription className="text-green-100">
+      Current Cycle
+    </CardDescription>
+  </CardHeader>
+  <CardContent>
+    <p className="text-3xl font-bold">
+      ₹
+      {payrollData
+        .filter((p) => {
+          // only current month
+          const currentMonth = new Date().toISOString().slice(0, 7);
+          return p.period?.startsWith(currentMonth);
+        })
+        .reduce((acc, p) => acc + (p.net || 0), 0)
+        .toLocaleString()}
+    </p>
+  </CardContent>
+</Card>
+
 
               <Card className="bg-gradient-to-r from-yellow-500 to-amber-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">Avg Performance</CardTitle>
-                  <TrendingUp className="h-4 w-4 text-white/80" />
+                <CardHeader>
+                  <CardTitle>Avg Performance</CardTitle>
+                  <CardDescription className="text-yellow-100">
+                    All Employees
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">
-                    {departmentPerformance.length
-                      ? Math.round(departmentPerformance.reduce((a, d) => a + d.performance, 0) / departmentPerformance.length)
-                      : 0}%</div>
-                  <p className="text-xs opacity-80">Proxy (salary-based)</p>
+                  <p className="text-3xl font-bold">
+                    {Math.round(
+                      employees.reduce(
+                        (acc, e) =>
+                          acc +
+                          (e.performance?.[0]?.productivity || 0),
+                        0
+                      ) / employees.length
+                    )}
+                    %
+                  </p>
                 </CardContent>
               </Card>
 
               <Card className="bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">Departments</CardTitle>
-                  <Building className="h-4 w-4 text-white/80" />
+                <CardHeader>
+                  <CardTitle>Departments</CardTitle>
+                  <CardDescription className="text-purple-100">
+                    Active
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold">{departmentsAgg.length}</div>
-                  <p className="text-xs opacity-80">Active departments</p>
+                  <p className="text-3xl font-bold">{departments.length}</p>
                 </CardContent>
               </Card>
             </div>
 
+             {/* Charts (Bar + Pie) */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Department Performance */}
               <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
                 <CardHeader>
                   <CardTitle>Department Performance</CardTitle>
-                  <CardDescription>Proxy score per department</CardDescription>
+                  <CardDescription>Average performance scores by department</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <ResponsiveContainer width="100%" height={300}>
-                    <BarChart data={departmentPerformance}>
+                    <BarChart data={deptPerformance}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="department" />
+                      <XAxis
+                            dataKey="department"
+                            interval={0}
+                            angle={-30}
+                            textAnchor="end"
+                            height={80}
+                          />
                       <YAxis />
                       <Tooltip />
                       <Bar dataKey="performance" fill="#3b82f6" />
@@ -243,17 +372,25 @@ export default function HRDashboard() {
                 </CardContent>
               </Card>
 
+              {/* Department Distribution (PIE) */}
               <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
                 <CardHeader>
                   <CardTitle>Department Distribution</CardTitle>
-                  <CardDescription>Employees by department</CardDescription>
+                  <CardDescription>Employee count by department</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <ResponsiveContainer width="100%" height={300}>
                     <PieChart>
-                      <Pie data={departmentsAgg} cx="50%" cy="50%" labelLine={false}
-                           label={(d: any) => `${d.name}: ${d.count}`} outerRadius={80} dataKey="count">
-                        {departmentsAgg.map((_, index) => (
+                      <Pie
+                        data={departments}
+                        dataKey="count"
+                        nameKey="name"
+                        cx="50%"
+                        cy="50%"
+                        outerRadius={80}
+                        label={({ name, count }: any) => `${name}: ${count}`}
+                      >
+                        {departments.map((entry, index) => (
                           <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                         ))}
                       </Pie>
@@ -265,184 +402,310 @@ export default function HRDashboard() {
             </div>
           </TabsContent>
 
-          {/* Employees */}
-          <TabsContent value="employees" className="space-y-6">
-            <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
-              <CardHeader>
-                <CardTitle>Employee Management</CardTitle>
-                <CardDescription>View and manage all employees</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {employees.map((employee) => (
-                  <Card key={employee._id} className="p-4 bg-white shadow-sm hover:shadow-md rounded-lg flex justify-between items-center">
-                    <div className="flex items-center space-x-4">
-                      <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                        <span className="text-blue-600 font-medium">
-                          {String(employee.name || "")
-                            .split(" ")
-                            .map((n: string) => n[0])
-                            .join("")}
-                        </span>
-                      </div>
-                      <div>
-                        <h4 className="font-medium">{employee.name}</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {employee.position || "-"} • {employee.department || "-"}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-3">
-                      <Badge variant="outline">{employee.employeeId}</Badge>
-                      <Badge variant="default">active</Badge>
-                      <Button size="sm" variant="outline" onClick={() => setSelectedEmployee(employee)}>
-                        View Details
-                      </Button>
-                    </div>
-                  </Card>
-                ))}
-                {!employees.length && !loadingEmp && <p className="text-sm text-muted-foreground">No employees found.</p>}
-              </CardContent>
-            </Card>
+        {/* ✅ Employees Tab */}
+<TabsContent value="employees" className="space-y-6">
+  <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
+    <CardHeader>
+      <CardTitle>Employee Data</CardTitle>
+      <CardDescription>View all employees</CardDescription>
+    </CardHeader>
 
-            {/* Slide-over */}
-            {!!selectedEmployee && (
-              <div className="fixed inset-0 z-50 flex">
-                <div className="fixed inset-0 bg-black/50" onClick={() => setSelectedEmployee(null)} />
-                <div className="ml-auto w-full max-w-sm h-[90vh] my-auto rounded-lg bg-white shadow-xl p-6 overflow-y-auto">
-                  <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-xl font-semibold">{selectedEmployee.name}</h3>
-                    <Button variant="ghost" onClick={() => setSelectedEmployee(null)}><X className="h-5 w-5" /></Button>
-                  </div>
-                  <div className="space-y-2 text-sm text-muted-foreground">
-                    <div><span className="font-medium">Employee ID:</span> {selectedEmployee.employeeId}</div>
-                    <div><span className="font-medium">Department:</span> {selectedEmployee.department || "-"}</div>
-                    <div><span className="font-medium">Position:</span> {selectedEmployee.position || "-"}</div>
-                    <div><span className="font-medium">Email:</span> {selectedEmployee.email}</div>
-                    <div><span className="font-medium">Phone:</span> {selectedEmployee.phone || "-"}</div>
-                    <div><span className="font-medium">Salary:</span> {selectedEmployee.salary ? `Rs.${selectedEmployee.salary.toLocaleString()}` : "-"}</div>
-                  </div>
+    <CardContent className="space-y-4">
+      {employees.map((emp) => (
+        <Card
+          key={emp._id}
+          className="p-4 bg-white shadow-sm hover:shadow-md rounded-lg flex justify-between items-center"
+        >
+          {/* Avatar + Basic Info */}
+          <div className="flex items-center space-x-4">
+            <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+              <span className="text-blue-600 font-medium">
+                {emp.name.split(" ").map((n) => n[0]).join("")}
+              </span>
+            </div>
+            <div>
+              <h4 className="font-medium">{emp.name}</h4>
+              <p className="text-sm text-muted-foreground">
+                {emp.role} • {emp.department}
+              </p>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center space-x-3">
+            <Badge variant="outline">{emp.employeeId}</Badge>
+            <Badge variant={emp.status === "active" ? "default" : "secondary"}>
+              {emp.status || "active"}
+            </Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setSelectedEmployee(emp)}
+            >
+              View Details
+            </Button>
+          </div>
+        </Card>
+      ))}
+    </CardContent>
+  </Card>
+
+  {/* ✅ Sliding Panel */}
+  {selectedEmployee && (
+  <div className="fixed inset-0 z-50 flex justify-end">
+    {/* Overlay */}
+    <div
+      className="absolute inset-0 bg-black/50"
+      onClick={() => setSelectedEmployee(null)}
+    />
+
+    {/* Panel */}
+    <div className="relative z-60 w-full max-w-sm h-full bg-white shadow-xl p-6 overflow-y-auto">
+      {/* Header */}
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-xl font-semibold">{selectedEmployee.name}</h3>
+        <Button variant="ghost" onClick={() => setSelectedEmployee(null)}>
+          <X className="h-5 w-5" />
+        </Button>
+      </div>
+
+      {/* Employee Info */}
+      <div className="space-y-2 text-sm text-muted-foreground">
+        <div><span className="font-medium">Employee ID:</span> {selectedEmployee.employeeId}</div>
+        <div><span className="font-medium">Department:</span> {selectedEmployee.department}</div>
+        <div><span className="font-medium">Role:</span> {selectedEmployee.role}</div>
+        <div><span className="font-medium">Email:</span> {selectedEmployee.email}</div>
+        <div><span className="font-medium">Join Date:</span> {new Date(selectedEmployee.joinedOn).toLocaleDateString()}</div>
+        <div><span className="font-medium">Phone:</span> {selectedEmployee.contact || "-"}</div>
+        <div><span className="font-medium">Position:</span>{selectedEmployee.position || "-"}</div>
+      </div>
+
+      {/* Performance Button */}
+      <div className="mt-6">
+        <Button
+          size="sm"
+          className="bg-blue-600 hover:bg-blue-700 text-white"
+          onClick={() => setShowPerformance(!showPerformance)}
+        >
+          {showPerformance ? "Hide Performance" : "View Performance"}
+        </Button>
+      </div>
+
+      {/* Performance Chart */}
+      {showPerformance && selectedEmployee.performance?.length > 0 && (
+        <div className="mt-4 h-60">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={selectedEmployee.performance}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="month" />
+              <YAxis />
+              <Tooltip />
+              <Bar dataKey="productivity" fill="#3b82f6" />
+              <Bar dataKey="goals" fill="#10b981" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  </div>
+)}
+</TabsContent>
+
+        {/* ✅ Payroll Tab */}
+{/* ✅ Payroll Tab (HR Dashboard) */}
+<TabsContent value="payroll" className="space-y-6">
+  <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
+    <CardHeader>
+      <CardTitle>Salary Disbursement</CardTitle>
+      <CardDescription>View and process monthly salary payments</CardDescription>
+    </CardHeader>
+    <CardContent className="space-y-4">
+      {payrollData.length === 0 ? (
+        <p className="text-muted-foreground">No payroll records found.</p>
+      ) : (
+        payrollData.map((payroll) => {
+          const emp = payroll.user; // employee info from populated payroll
+          const netAmount = payroll.net;
+          const status = payroll.status;
+
+          return (
+            <Card
+              key={payroll._id}
+              className="p-4 flex justify-between items-center bg-white shadow-sm hover:shadow-md rounded-lg"
+            >
+              {/* Employee + Period Info */}
+              <div className="flex items-center space-x-4">
+                <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                  <span className="text-green-600 font-bold">₹</span>
+                </div>
+                <div>
+                  <h4 className="font-medium">{payroll.user?.name} ({payroll.user?.employeeId}) • {payroll.user?.department}</h4>
+        <p className="text-sm text-muted-foreground">
+           Period: {payroll.period} • Net: ₹{payroll.net.toLocaleString()}
+        </p>
                 </div>
               </div>
-            )}
-          </TabsContent>
 
-          {/* Payroll */}
-          <TabsContent value="payroll" className="space-y-6">
-            <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
-              <CardHeader>
-                <CardTitle>Salary Disbursement</CardTitle>
-                <CardDescription>Process monthly salary payments</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {employees.map((e) => (
-                  <Card key={e._id} className="p-4 flex justify-between items-center bg-white shadow-sm hover:shadow-md rounded-lg">
-                    <div className="flex items-center space-x-4">
-                      <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                        <span className="text-green-600 font-bold">₹</span>
-                      </div>
-                      <div>
-                        <h4 className="font-medium">{e.name}</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {e.employeeId} • {e.department || "-"} • ₹{(e.salary || 0).toLocaleString()}/month
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-3">
-                      {payrollStatus[e._id] === "paid" ? (
-                        <Badge variant="default">Paid</Badge>
-                      ) : payrollStatus[e._id] === "processing" ? (
-                        <Badge variant="secondary">Processing...</Badge>
-                      ) : payrollStatus[e._id] === "failed" ? (
-                        <Badge variant="destructive">Failed</Badge>
-                      ) : (
-                        <Button size="sm" onClick={() => handlePaySalary(e)}>Pay Salary</Button>
-                      )}
-                      {/* Payslip will be accessible once payroll entry exists (open new tab when you have ID) */}
-                      <Button size="sm" variant="outline" onClick={() => alert("Open payslip after listing payrolls for this employee.")}>
-                        <FileText className="h-4 w-4 mr-1" />
-                        Payslip
-                      </Button>
-                    </div>
-                  </Card>
-                ))}
-              </CardContent>
+              {/* Actions */}
+              <div className="flex items-center space-x-3">
+                {status === "paid" ? (
+                  <Badge variant="default">Paid</Badge>
+                ) : status === "processing" ? (
+                  <Badge variant="secondary">Processing...</Badge>
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => handlePaySalary(payroll._id)}
+                  >
+                    Pay Salary
+                  </Button>
+                )}
+                {status === "paid" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => generatePayslip(payroll, hrData?.name || "HR Admin")}
+                  >
+                    <FileText className="h-4 w-4 mr-1" />
+                    Payslip
+                  </Button>
+                )}
+              </div>
             </Card>
-          </TabsContent>
+          );
+        })
+      )}
+    </CardContent>
+  </Card>
+</TabsContent>
 
-          {/* Departments */}
-          <TabsContent value="departments" className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {departmentsAgg.map((dept, index) => (
-                <Card key={dept.name} className="bg-white shadow-md hover:shadow-lg rounded-lg">
-                  <CardHeader className="flex justify-between items-center">
-                    <CardTitle className="text-lg">{dept.name}</CardTitle>
-                    <div className="w-8 h-8 rounded-full flex items-center justify-center" style={{ backgroundColor: COLORS[index % COLORS.length] + "20" }}>
-                      <Building className="h-4 w-4" style={{ color: COLORS[index % COLORS.length] }} />
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-2">
-                    <div className="flex justify-between"><span className="text-sm text-muted-foreground">Employees</span><span className="font-medium">{dept.count}</span></div>
-                    <div className="flex justify-between"><span className="text-sm text-muted-foreground">Budget</span><span className="font-medium">—</span></div>
-                    <Button size="sm" variant="outline" className="w-full mt-2" onClick={() => alert(`Manage Department: ${dept.name}`)}>Manage Department</Button>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </TabsContent>
 
-          {/* Feedback */}
-          <TabsContent value="feedback" className="space-y-6">
-            <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
-              <CardHeader>
-                <CardTitle>Employee Feedback</CardTitle>
-                <CardDescription>Provide feedback to employees</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label>Select Employee</Label>
-                  <Select onValueChange={(id) => setSelectedEmployee(employees.find((e) => e.employeeId === id) || null)}>
-                    <SelectTrigger><SelectValue placeholder="Choose an employee" /></SelectTrigger>
-                    <SelectContent>
-                      {employees.map((e) => (
-                        <SelectItem key={e._id} value={e.employeeId}>
-                          {e.name} - {e.position || "-"}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Feedback</Label>
-                  <Textarea placeholder="Write your feedback here..." value={feedback} onChange={(e) => setFeedback(e.target.value)} rows={4} />
-                </div>
-                <Button onClick={submitFeedback} disabled={!selectedEmployee || !feedback}>
-                  <Send className="h-4 w-4 mr-2" />
-                  Send Feedback
-                </Button>
-              </CardContent>
-            </Card>
+          {/* ✅ Departments Tab */}
+<TabsContent value="departments" className="space-y-6">
+  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    {departments.map((dept, index) => (
+      <Card
+        key={dept._id}
+        className="bg-white shadow-md hover:shadow-lg rounded-lg"
+      >
+        {/* Header */}
+        <CardHeader className="flex justify-between items-center">
+          <CardTitle className="text-lg">{dept.name}</CardTitle>
+          <div
+            className="w-8 h-8 rounded-full flex items-center justify-center"
+            style={{ backgroundColor: COLORS[index % COLORS.length] + "20" }}
+          >
+            <Building
+              className="h-4 w-4"
+              style={{ color: COLORS[index % COLORS.length] }}
+            />
+          </div>
+        </CardHeader>
 
-            <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
-              <CardHeader>
-                <CardTitle>Sent Feedback</CardTitle>
-                <CardDescription>Recently sent feedback</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {sentFeedback.length === 0 && <p className="text-sm text-muted-foreground">No feedback sent yet.</p>}
-                {sentFeedback.map((item, idx) => (
-                  <div key={idx} className="p-4 border rounded-lg bg-gray-50 hover:bg-gray-100">
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="font-medium">To: {item.employeeName}</span>
-                      <span className="text-xs text-muted-foreground">{item.date}</span>
-                    </div>
-                    <p className="text-sm">{item.feedback}</p>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
+        {/* Content */}
+        <CardContent className="space-y-2">
+          <div className="flex justify-between">
+            <span className="text-sm text-muted-foreground">Employees</span>
+            <span className="font-medium">{dept.count}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-sm text-muted-foreground">Budget</span>
+            <span className="font-medium">
+              ₹{(deptBudgets[dept._id] || 0).toLocaleString()}
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+    ))}
+  </div>
+</TabsContent>
+
+        {/* ✅ Feedback Tab */}
+<TabsContent value="feedback" className="space-y-6">
+  {/* Feedback Form */}
+  <Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
+    <CardHeader>
+      <CardTitle>Employee Feedback</CardTitle>
+      <CardDescription>Provide feedback to employees</CardDescription>
+    </CardHeader>
+    <CardContent className="space-y-4">
+      <div className="space-y-2">
+        <Label>Select Employee</Label>
+        <Select
+          value={selectedEmployee?._id || ""}
+          onValueChange={(val) => {
+            const emp = employees.find((e) => e._id === val);
+            setSelectedEmployee(emp || null);
+          }}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="Choose an employee" />
+          </SelectTrigger>
+          <SelectContent>
+            {employees.map((employee) => (
+              <SelectItem key={employee._id} value={employee._id}>
+                {employee.name} – {employee.department}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
+
+      <div className="space-y-2">
+        <Label>Feedback</Label>
+        <Textarea
+          placeholder="Write your feedback here..."
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          rows={4}
+        />
+      </div>
+
+      <Button
+        onClick={submitFeedback}
+        disabled={!selectedEmployee || !feedback}
+      >
+        <Send className="h-4 w-4 mr-2" />
+        Send Feedback
+      </Button>
+    </CardContent>
+  </Card>
+
+  {/* Sent Feedback History (HR) */}
+<Card className="bg-white shadow-md hover:shadow-lg rounded-lg">
+  <CardHeader>
+    <CardTitle>Sent Feedback (HR)</CardTitle>
+  </CardHeader>
+  <CardContent>
+    {sentFeedback.length > 0 ? (
+      <ul className="space-y-2">
+        {sentFeedback.map((f, idx) => (
+          <li
+            key={idx}
+            className="p-3 border rounded-lg shadow-sm bg-gray-50"
+          >
+            <p className="font-semibold">
+              {f.user?.name || f.employeeName}
+              <span className="ml-2 text-xs text-green-600">
+                (by HR)
+              </span>
+            </p>
+            <p className="text-sm text-gray-600">{f.message}</p>
+            <p className="text-xs text-gray-400">
+              {new Date(f.createdAt).toLocaleString()}
+            </p>
+          </li>
+        ))}
+      </ul>
+    ) : (
+      <p>No feedbacks sent yet.</p>
+    )}
+  </CardContent>
+</Card>
+</TabsContent>
+      </Tabs>
+    </div>
     </div>
   );
 }
+            

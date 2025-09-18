@@ -9,205 +9,242 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Calendar, Clock, Target, TrendingUp, User, CheckCircle, XCircle, Star } from "lucide-react"
+import { Calendar, Clock, Target, TrendingUp, User, CheckCircle, XCircle, Star, FileText } from "lucide-react"
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts"
-import api from "@/lib/api"            // axios client created earlier
-import { useAuth } from "@/lib/auth-context" // auth context created earlier
+import api from "@/lib/apiClient";
+import { auth } from "@/lib/firebaseClient"
+import { generatePayslip } from "@/lib/generatePayslip";
 
-export default function EmployeeDashboard() {
-  // get logged-in user (expects auth-context from earlier)
-  const { user } = useAuth()
 
-  // use employee ID from logged-in user when available
-  const employeeIdFromUser = user?.employeeId || user?._id || "EMP001"
-
-  // --- state that used to be static / mock
-  const [employeeData, setEmployeeData] = useState<any>({
-    id: employeeIdFromUser,
-    name: "Loading...",
-    department: "",
-    position: "",
-    email: "",
-    joinDate: "",
-    salary: 0,
-  })
-
-  const [performanceData, setPerformanceData] = useState<any[]>([])
-  const [attendanceData, setAttendanceData] = useState<any[]>([])
+export default function EmployeeDashboardData() {
+  const [employeeData, setEmployeeData] = useState(null)
+  const [performanceData, setPerformanceData] = useState([])
+  const [attendanceData, setAttendanceData] = useState<any[]>([]);
+  const [leaveData, setLeaveData] = useState<any[]>([]);
+  const [payrollData, setPayrollData] = useState([])
+  const [feedbackData, setFeedbackData] = useState([])
   const [attendanceStatus, setAttendanceStatus] = useState("present")
   const [todayMarked, setTodayMarked] = useState(false)
-  const [goals, setGoals] = useState<any[]>([])
-  const [leaveRequest, setLeaveRequest] = useState({ type: "", reason: "", startDate: "", endDate: "" })
-  const [leaveHistory, setLeaveHistory] = useState<any[]>([])
-  const [feedbackData, setFeedbackData] = useState<any[]>([])
-  const [salaryHistory, setSalaryHistory] = useState<any[]>([])
-  const [leaveBalance, setLeaveBalance] = useState({
-    vacation: 0,
-    sick: 0,
-    personal: 0,
-    emergency: 0,
-  })
+  const [goals, setGoals] = useState([])
+  const [openCreate, setOpenCreate] = useState(false)
+  const [openUpdate, setOpenUpdate] = useState<{ open: boolean; goal?: any }>({ open: false })
+  const [newGoal, setNewGoal] = useState({ title: "", description: "", deadline: "" })
+  const [progress, setProgress] = useState<number>(0)
+  const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; goalId: string | null }>({open: false, goalId: null,})
+  const [leaveRequest, setLeaveRequest] = useState({ type: "casual", startDate: "", endDate: "", reason: "" })
+  const [userLoaded, setUserLoaded] = useState(false)
+  const [performanceHistory, setPerformanceHistory] = useState<any[]>([]);
+  const [thisMonthPerformance, setThisMonthPerformance] = useState<any>(null);
 
-  // base url from env or fallback
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"
 
-  // --- fetch all required data once user/employeeId available
   useEffect(() => {
-    if (!employeeIdFromUser) return
-
-    const fetchAll = async () => {
-      try {
-        // employee profile
-        try {
-          const { data } = await api.get(`${API_BASE}/employees/${employeeIdFromUser}`)
-          if (data) setEmployeeData(data)
-        } catch (e) {
-          // fallback: if endpoint not present, try /users/:id or keep existing state
-          console.warn("employee fetch:", e)
-        }
-
-        // performance/time-series (if available)
-        try {
-          const { data } = await api.get(`${API_BASE}/performance/${employeeIdFromUser}`)
-          // expected shape: [{ month: 'Jan', productivity: 85, goals: 90 }, ...]
-          if (Array.isArray(data)) setPerformanceData(data)
-        } catch (e) {
-          console.warn("performance fetch:", e)
-        }
-
-        // attendance history
-        try {
-          const { data } = await api.get(`${API_BASE}/attendance/${employeeIdFromUser}`)
-          // expected: [{ date: '2025-08-01', status: 'present', hours: 8 }, ...] OR monthly aggregated
-          if (Array.isArray(data)) setAttendanceData(data)
-        } catch (e) {
-          console.warn("attendance fetch:", e)
-        }
-
-        // goals
-        try {
-          const { data } = await api.get(`${API_BASE}/goals/${employeeIdFromUser}`)
-          if (Array.isArray(data)) setGoals(data)
-        } catch (e) {
-          console.warn("goals fetch:", e)
-        }
-
-        // leaves
-        try {
-          const { data } = await api.get(`${API_BASE}/leaves/${employeeIdFromUser}`)
-          if (Array.isArray(data)) setLeaveHistory(data)
-        } catch (e) {
-          console.warn("leaves fetch:", e)
-        }
-
-        // feedback
-        try {
-          const { data } = await api.get(`${API_BASE}/feedback/${employeeIdFromUser}`)
-          if (Array.isArray(data)) setFeedbackData(data)
-        } catch (e) {
-          console.warn("feedback fetch:", e)
-        }
-
-        // payroll / salary history
-        try {
-          const { data } = await api.get(`${API_BASE}/payments/${employeeIdFromUser}`)
-          if (Array.isArray(data)) setSalaryHistory(data)
-        } catch (e) {
-          console.warn("payments fetch:", e)
-        }
-
-        // leave balance (optional endpoint)
-        try {
-          const { data } = await api.get(`${API_BASE}/leaves/balance/${employeeIdFromUser}`)
-          if (data) setLeaveBalance(data)
-        } catch (e) {
-          // fallback keep default
-        }
-      } catch (error) {
-        console.error("Error fetching employee dashboard data:", error)
+  // Listen for Firebase auth changes
+    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+      if (!user) {
+        console.log("No user logged in, redirecting...")
+        window.location.href = "/"
+        return
       }
-    }
+      console.log("Current user:", user)
+      await fetchDashboardData()
+      setUserLoaded(true)
+    })
 
-    fetchAll()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeIdFromUser])
+    return () => unsubscribe()
+  }, [])
 
-  // --- handlers that call backend and refresh local state
 
-  const markAttendance = async () => {
+
+  const fetchDashboardData = async () => {
     try {
-      // POST /attendance  body: { employeeId, status } (adjust to your backend)
-      const { data } = await api.post(`${API_BASE}/attendance`, {
-        employeeId: employeeIdFromUser,
-        status: attendanceStatus,
-      })
-      setTodayMarked(true)
-      alert("Attendance marked successfully")
-      // refetch attendance list
-      try {
-        const res = await api.get(`${API_BASE}/attendance/${employeeIdFromUser}`)
-        if (Array.isArray(res.data)) setAttendanceData(res.data)
-      } catch (e) {
-        console.warn("refetch attendance failed", e)
-      }
-    } catch (error: any) {
-      console.error("Failed to mark attendance:", error)
-      alert(error?.response?.data?.message || "Failed to mark attendance")
+      const user = auth.currentUser
+      if (!user) return
+
+      // Employee profile
+      const profileRes = await api.get("/api/users/me")
+      const profile = profileRes.data
+      setEmployeeData(profile)
+
+      // Performance
+      const perfRes = await api.get("/api/performances/me")
+      const perf = perfRes.data.map((p) => ({
+        month: p.period,
+        productivity: p.score || 0,
+        goals: p.notes ? 100 : 0,
+      })).reverse()
+      setPerformanceData(perf)
+
+      const currentMonth = new Date().toISOString().slice(0, 7); // e.g., "2025-09"
+      const monthPerf = perfRes.data.find((p: any) => p.period === currentMonth);
+      setThisMonthPerformance(monthPerf || null);
+
+      // Attendance
+const attendanceRes = await api.get("/api/attendance/me")
+const rawAttendance = attendanceRes.data
+
+
+const attendance = rawAttendance.map((a) => ({
+  date: new Date(a.date),
+  status: a.status,
+  hours: a.hours || 8,
+}))
+
+// ✅ Save formatted for UI
+setAttendanceData(
+  attendance.map((a) => ({
+    ...a,
+    date: a.date.toLocaleDateString(),
+  }))
+)
+
+// ✅ Detect today's attendance
+const today = new Date()
+today.setHours(0, 0, 0, 0)
+const tomorrow = new Date(today)
+tomorrow.setDate(today.getDate() + 1)
+
+setTodayMarked(
+  attendance.some((a) => {
+    const d = new Date(a.date)
+    return d >= today && d < tomorrow
+  })
+)
+
+      // Leaves
+      const leaveRes = await api.get("/api/leaves/me")
+      const leaves = leaveRes.data.map((l) => ({
+        type: l.type,
+        startDate: new Date(l.from).toLocaleDateString(),
+        endDate: new Date(l.to).toLocaleDateString(),
+        status: l.status,
+      }))
+      setLeaveData(leaves)
+
+      // Goals
+      const goalsRes = await api.get("/api/goals/me")
+      setGoals(goalsRes.data)
+
+      // Payroll
+      const payrollRes = await api.get("/api/payroll/me")
+      setPayrollData(payrollRes.data)
+
+      // Feedback
+      const feedbackRes = await api.get("/api/feedbacks/me")
+      setFeedbackData(feedbackRes.data.map((f) => ({
+        id: f._id,
+        sender: f.senderRole,
+        message: f.message,
+        date: new Date(f.date).toLocaleDateString(),
+      })))
+
+    } catch (err) {
+      console.error("Failed to fetch employee dashboard data:", err)
     }
   }
 
+  // Leave request
   const submitLeaveRequest = async () => {
-    // basic validation
-    if (!leaveRequest.type || !leaveRequest.startDate || !leaveRequest.endDate) {
-      alert("Please choose leave type and dates")
-      return
-    }
     try {
-      // POST /leaves (or /leave) body: { employeeId, type, startDate, endDate, reason }
-      const { data } = await api.post(`${API_BASE}/leaves`, {
-        employeeId: employeeIdFromUser,
+      const user = auth.currentUser
+      if (!user) return
+
+      await api.post("/api/leaves", {
         type: leaveRequest.type,
-        startDate: leaveRequest.startDate,
-        endDate: leaveRequest.endDate,
+        from: leaveRequest.startDate,
+        to: leaveRequest.endDate,
         reason: leaveRequest.reason,
       })
-      alert("Leave request submitted")
-      setLeaveRequest({ type: "", reason: "", startDate: "", endDate: "" })
-      // refresh leaveHistory
-      const res = await api.get(`${API_BASE}/leaves/${employeeIdFromUser}`)
-      if (Array.isArray(res.data)) setLeaveHistory(res.data)
-    } catch (error: any) {
-      console.error("Failed to submit leave:", error)
-      alert(error?.response?.data?.message || "Failed to submit leave request")
+
+      const leavesRes = await api.get("/api/leaves/me")
+      const leaves = leavesRes.data.map((l) => ({
+        type: l.type,
+        startDate: new Date(l.from).toLocaleDateString(),
+        endDate: new Date(l.to).toLocaleDateString(),
+        status: l.status,
+      }))
+      setLeaveData(leaves)
+      setLeaveRequest({ type: "casual", startDate: "", endDate: "", reason: "" })
+    } catch (err) {
+      console.error("Failed to submit leave request:", err)
     }
   }
 
-  const submitFeedback = async (message: string) => {
-    if (!message) {
-      alert("Please enter feedback message")
-      return
+  // Mark attendance
+const markAttendance = async () => {
+  try {
+    const user = auth.currentUser
+    if (!user) return
+
+    const newRecord = await api
+      .post("/api/attendance", { status: attendanceStatus })
+      .then((res) => res.data)
+
+    const formattedRecord = {
+      date: new Date(newRecord.date).toLocaleDateString(),
+      status: newRecord.status,
+      hours: newRecord.hours || 8,
     }
-    try {
-      await api.post(`${API_BASE}/feedback`, {
-        employeeId: employeeIdFromUser,
-        message,
-      })
-      alert("Feedback submitted")
-      // refresh feedback list
-      const res = await api.get(`${API_BASE}/feedback/${employeeIdFromUser}`)
-      if (Array.isArray(res.data)) setFeedbackData(res.data)
-    } catch (error: any) {
-      console.error("Failed to submit feedback:", error)
-      alert(error?.response?.data?.message || "Failed to submit feedback")
-    }
+
+    // ✅ prepend the new record to history
+    setAttendanceData((prev) => [formattedRecord, ...prev])
+
+    // ✅ mark today as completed
+    setTodayMarked(true)
+  } catch (err) {
+    console.error("Failed to mark attendance:", err)
   }
+}
 
-  // small helper to compute completed goals if API doesn't provide aggregated stat
-  const completedGoalsCount = () => (goals?.filter?.((g: any) => g.status === "completed")?.length || 0)
+// Create goal
+const createGoal = async () => {
+  try {
+    const res = await api.post("/api/goals", newGoal);
+    // Add new goal at the top of the list
+    setGoals([res.data, ...goals]);
+    setNewGoal({ title: "", description: "", deadline: "" });
+    setOpenCreate(false);
+  } catch (err) {
+    console.error("Failed to create goal:", err);
+  }
+}
 
-  // --- local temporary feedback input
-  const [feedbackInput, setFeedbackInput] = useState("")
+const deleteGoal = async (goalId: string) => {
+  try {
+    await api.delete(`/api/goals/${goalId}`)
+    setGoals(goals.filter((g) => g._id !== goalId))
+  } catch (err) {
+    console.error("Failed to delete goal:", err)
+  }
+}
+
+
+// Update goal progress
+const updateProgress = async (goalId: string) => {
+  try {
+    // Determine new status
+    const newStatus = progress >= 100 ? "completed" : "in-progress";
+
+    const res = await api.put(`/api/goals/${goalId}`, {
+      progress,
+      status: newStatus,
+    });
+
+    // Update local state
+    setGoals(goals.map((g) => (g._id === goalId ? res.data : g)));
+
+    // Close dialog
+    setOpenUpdate({ open: false, goalId: null });
+    setProgress(0);
+  } catch (err) {
+    console.error("Failed to update progress:", err);
+  }
+};
+
+
+  if (!userLoaded) return <p>Loading dashboard...</p>
+
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -218,13 +255,23 @@ export default function EmployeeDashboard() {
             <div className="flex items-center">
               <User className="h-8 w-8 text-blue-600" />
               <div className="ml-3">
-                <h1 className="text-2xl font-bold text-gray-900">Welcome, {employeeData.name}</h1>
-                <p className="text-sm text-gray-500">{employeeData.position} • {employeeData.department}</p>
+                <h1 className="text-2xl font-bold text-gray-900">Welcome, {employeeData?.name}</h1>
+                <p className="text-sm text-gray-500">{employeeData?.position} • {employeeData?.department}</p>
               </div>
             </div>
-            <Button variant="outline" onClick={() => (window.location.href = "/")}>
-              Logout
-            </Button>
+            <Button
+  variant="outline"
+  onClick={async () => {
+    try {
+      await auth.signOut(); // ✅ clear Firebase session
+      window.location.href = "/"; // redirect to login/landing
+    } catch (error) {
+      console.error("Logout failed:", error);
+    }
+  }}
+>
+  Logout
+</Button>
           </div>
         </div>
       </header>
@@ -243,77 +290,82 @@ export default function EmployeeDashboard() {
           <TabsContent value="dashboard" className="space-y-6">
             {/* Profile Info */}
             <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
-              <CardHeader>
-                <CardTitle>Employee Profile</CardTitle>
-                <CardDescription>Your personal and professional information</CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-2 gap-4">
-                {Object.entries({
-                  "Employee ID": employeeData.id,
-                  "Full Name": employeeData.name,
-                  "Department": employeeData.department,
-                  "Position": employeeData.position,
-                  "Email": employeeData.email,
-                  "Join Date": employeeData.joinDate,
-                }).map(([label, value], idx) => (
-                  <div key={idx}>
-                    <Label className="text-sm font-medium text-muted-foreground">{label}</Label>
-                    <p className="text-lg font-semibold">{value}</p>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+      <CardHeader>
+        <CardTitle>Employee Profile</CardTitle>
+        <CardDescription>Your personal and professional information</CardDescription>
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-4">
+        {Object.entries({
+          "Employee ID": employeeData?.employeeId,
+          "Full Name": employeeData?.name,
+          "Department": employeeData?.department,
+          "Position": employeeData?.position,
+          "Email": employeeData?.email,
+          "Join Date": new Date(employeeData?.joinedOn).toLocaleDateString(),
+        }).map(([label, value], idx) => (
+          <div key={idx}>
+            <Label className="text-sm font-medium text-muted-foreground">{label}</Label>
+            <p className="text-lg font-semibold">{value}</p>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
 
             {/* Quick Stats Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <Card className="bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">This Month</CardTitle>
-                  <TrendingUp className="h-4 w-4 text-white/80" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">{performanceData?.length ? `${Math.round((performanceData.reduce((s, p) => s + (p.productivity || 0), 0) / performanceData.length))}%` : "—"}</div>
-                  <p className="text-xs opacity-80">Productivity Score</p>
-                </CardContent>
-              </Card>
+<div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+  <Card className="bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
+    <CardHeader className="flex justify-between pb-2">
+      <CardTitle className="text-sm font-medium">This Month</CardTitle>
+      <TrendingUp className="h-4 w-4 text-white/80" />
+    </CardHeader>
+    <CardContent>
+      <div className="text-2xl font-bold">
+        {thisMonthPerformance ? `${thisMonthPerformance.score || 0}%` : "-"}
+      </div>
+      <p className="text-xs opacity-80">Productivity Score</p>
+    </CardContent>
+  </Card>
 
-              <Card className="bg-gradient-to-r from-green-500 to-emerald-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">Attendance</CardTitle>
-                  <Clock className="h-4 w-4 text-white/80" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {attendanceData?.length ? `${attendanceData.filter(a => a.status === "present").length}/${attendanceData.length}` : "—"}
-                  </div>
-                  <p className="text-xs opacity-80">Days Present</p>
-                </CardContent>
-              </Card>
+  <Card className="bg-gradient-to-r from-green-500 to-emerald-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
+    <CardHeader className="flex justify-between pb-2">
+      <CardTitle className="text-sm font-medium">Attendance</CardTitle>
+      <Clock className="h-4 w-4 text-white/80" />
+    </CardHeader>
+    <CardContent>
+      <div className="text-2xl font-bold">
+        {attendanceData.filter(a => a.status !== "absent").length}/{attendanceData.length} 
+      </div>
+      <p className="text-xs opacity-80">Days Present / Work</p>
+    </CardContent>
+  </Card>
 
-              <Card className="bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">Goals</CardTitle>
-                  <Star className="h-4 w-4 text-white/80" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {completedGoalsCount()}/{goals.length || 0}
-                  </div>
-                  <p className="text-xs opacity-80">Completed</p>
-                </CardContent>
-              </Card>
+  <Card className="bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
+    <CardHeader className="flex justify-between pb-2">
+      <CardTitle className="text-sm font-medium">Goals</CardTitle>
+      <Star className="h-4 w-4 text-white/80" />
+    </CardHeader>
+    <CardContent>
+      <div className="text-2xl font-bold">
+        {goals.filter((g) => g.status === "completed").length}/{goals.length}
+      </div>
+      <p className="text-xs opacity-80">Completed</p>
+    </CardContent>
+  </Card>
 
-              <Card className="bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
-                <CardHeader className="flex justify-between pb-2">
-                  <CardTitle className="text-sm font-medium">Leave Balance</CardTitle>
-                  <Calendar className="h-4 w-4 text-white/80" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">{leaveBalance?.vacation ?? 0}</div>
-                  <p className="text-xs opacity-80">Vacation Days</p>
-                </CardContent>
-              </Card>
-            </div>
+  <Card className="bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-lg hover:shadow-xl transition transform hover:-translate-y-1">
+    <CardHeader className="flex justify-between pb-2">
+      <CardTitle className="text-sm font-medium">Leaves Taken</CardTitle>
+      <Calendar className="h-4 w-4 text-white/80" />
+    </CardHeader>
+    <CardContent>
+      <div className="text-2xl font-bold">
+        {leaveData.filter(l => l.status === "approved").length} 
+      </div>
+      <p className="text-xs opacity-80">Approved</p>
+    </CardContent>
+  </Card>
+</div>
+
 
             {/* Performance Chart */}
             <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
@@ -337,140 +389,264 @@ export default function EmployeeDashboard() {
           </TabsContent>
 
           {/* Attendance Tab */}
-          <TabsContent value="attendance" className="space-y-6">
-            {/* Mark Today's Attendance */}
-            <Card className="bg-white shadow-md hover:shadow-lg transition rounded-lg">
-              <CardHeader>
-                <CardTitle>Mark Today's Attendance</CardTitle>
-                <CardDescription>Record your attendance for today</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-center space-x-4">
-                  <Select value={attendanceStatus} onValueChange={setAttendanceStatus}>
-                    <SelectTrigger className="w-48">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="present">Present</SelectItem>
-                      <SelectItem value="absent">Absent</SelectItem>
-                      <SelectItem value="half-day">Half Day</SelectItem>
-                      <SelectItem value="work-from-home">Work From Home</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    onClick={markAttendance}
-                    disabled={todayMarked}
-                    className={`font-medium ${
-                      attendanceStatus === "present"
-                        ? "bg-green-600 hover:bg-green-700 text-white"
-                        : attendanceStatus === "absent"
-                        ? "bg-red-600 hover:bg-red-700 text-white"
-                        : attendanceStatus === "half-day"
-                        ? "bg-yellow-500 hover:bg-yellow-600 text-white"
-                        : "bg-indigo-600 hover:bg-indigo-700 text-white"
-                    }`}
-                  >
-                    {todayMarked ? "Marked" : "Mark Attendance"}
-                  </Button>
-                </div>
-                {todayMarked && (
-                  <p className="text-sm text-green-700 font-medium">✓ Attendance marked successfully for today</p>
-                )}
-              </CardContent>
-            </Card>
+             <TabsContent value="attendance" className="space-y-6">
+      {/* Mark Today's Attendance */}
+      <Card className="bg-white shadow-md hover:shadow-lg transition rounded-lg">
+        <CardHeader>
+          <CardTitle>Mark Today's Attendance</CardTitle>
+          <CardDescription>Record your attendance for today</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center space-x-4">
+            <Select value={attendanceStatus} onValueChange={setAttendanceStatus}>
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="present">Present</SelectItem>
+                <SelectItem value="absent">Absent</SelectItem>
+                <SelectItem value="half-day">Half Day</SelectItem>
+                <SelectItem value="work-from-home">Work From Home</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              onClick={markAttendance}
+              disabled={todayMarked}
+              className={`font-medium ${
+                attendanceStatus === "present"
+                  ? "bg-green-600 hover:bg-green-700 text-white"
+                  : attendanceStatus === "absent"
+                  ? "bg-red-600 hover:bg-red-700 text-white"
+                  : attendanceStatus === "half-day"
+                  ? "bg-yellow-500 hover:bg-yellow-600 text-white"
+                  : "bg-indigo-600 hover:bg-indigo-700 text-white"
+              }`}
+            >
+              {todayMarked ? "Marked" : "Mark Attendance"}
+            </Button>
+          </div>
+          {todayMarked && (
+            <p className="text-sm text-green-700 font-medium">
+              ✓ Attendance marked successfully for today
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
-            {/* Attendance History */}
-            <div className="space-y-3">
-              {attendanceData.length === 0 && (
-                <p className="text-sm text-muted-foreground">No attendance records found.</p>
+      {/* Attendance History */}
+      <div className="space-y-3">
+        {attendanceData.map((record, index) => (
+          <Card
+            key={index}
+            className={`flex items-center justify-between p-4 shadow-sm rounded-lg transition hover:shadow-md ${
+              record.status === "present"
+                ? "bg-green-50 border border-green-200"
+                : record.status === "absent"
+                ? "bg-red-50 border border-red-200"
+                : record.status === "work-from-home"
+                ? "bg-indigo-50 border border-indigo-200"
+                : "bg-yellow-50 border border-yellow-200"
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              {record.status === "present" ? (
+                <CheckCircle className="h-5 w-5 text-green-600" />
+              ) : record.status === "absent" ? (
+                <XCircle className="h-5 w-5 text-red-600" />
+              ) : record.status === "work-from-home" ? (
+                <Clock className="h-5 w-5 text-indigo-600" />
+              ) : (
+                <Target className="h-5 w-5 text-yellow-600" />
               )}
-              {attendanceData.map((record, index) => (
-                <Card
-                  key={index}
-                  className={`flex items-center justify-between p-4 shadow-sm rounded-lg transition hover:shadow-md ${
-                    record.status === "present"
-                      ? "bg-green-50 border border-green-200"
-                      : record.status === "absent"
-                      ? "bg-red-50 border border-red-200"
-                      : record.status === "work-from-home"
-                      ? "bg-indigo-50 border border-indigo-200"
-                      : "bg-yellow-50 border border-yellow-200"
-                  }`}
-                >
-                  <div className="flex items-center space-x-3">
-                    {record.status === "present" ? (
-                      <CheckCircle className="h-5 w-5 text-green-600" />
-                    ) : record.status === "absent" ? (
-                      <XCircle className="h-5 w-5 text-red-600" />
-                    ) : record.status === "work-from-home" ? (
-                      <Clock className="h-5 w-5 text-indigo-600" />
-                    ) : (
-                      <Target className="h-5 w-5 text-yellow-600" />
-                    )}
-                    <span className="font-medium text-gray-700">{record.date || record.createdAt?.split("T")[0]}</span>
-                  </div>
-                  <div className="text-right">
-                    <Badge
-                      className={`px-2 py-1 text-sm font-semibold rounded ${
-                        record.status === "present"
-                          ? "bg-green-100 text-green-800"
-                          : record.status === "absent"
-                          ? "bg-red-100 text-red-800"
-                          : record.status === "work-from-home"
-                          ? "bg-indigo-100 text-indigo-800"
-                          : "bg-yellow-100 text-yellow-800"
-                      }`}
-                    >
-                      {String(record.status).replace("-", " ").replace(/\b\w/g, (c) => c.toUpperCase())}
-                    </Badge>
-                    <p className="text-sm text-gray-500 mt-1">{record.hours ?? "-"}h worked</p>
-                  </div>
-                </Card>
-              ))}
+              <span className="font-medium text-gray-700">{record.date}</span>
             </div>
-          </TabsContent>
+            <div className="text-right">
+              <Badge
+                className={`px-2 py-1 text-sm font-semibold rounded ${
+                  record.status === "present"
+                    ? "bg-green-100 text-green-800"
+                    : record.status === "absent"
+                    ? "bg-red-100 text-red-800"
+                    : record.status === "work-from-home"
+                    ? "bg-indigo-100 text-indigo-800"
+                    : "bg-yellow-100 text-yellow-800"
+                }`}
+              >
+                {record.status.replace("-", " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+              </Badge>
+              <p className="text-sm text-gray-500 mt-1">{record.hours}h worked</p>
+            </div>
+          </Card>
+        ))}
+      </div>
+    </TabsContent>
+          
+                   {/* Goals Tab */}
+<TabsContent value="goals" className="space-y-6">
+  {/* Create Goal Button */}
+  <Button
+    onClick={() => setOpenCreate(true)}
+    className="bg-blue-600 hover:bg-blue-700 text-white"
+  >
+    + Create Goal
+  </Button>
 
-          {/* Goals Tab */}
-          <TabsContent value="goals" className="space-y-6">
-            {goals.length === 0 && <p className="text-sm text-muted-foreground">No goals found.</p>}
-            {goals.map((goal: any) => (
-              <Card key={goal.id || goal._id} className="bg-white/90 shadow-lg hover:shadow-xl transition">
-                <CardHeader className="flex flex-col items-start space-y-2">
-                  <div className="flex justify-between w-full items-start">
-                    <CardTitle className="text-left">{goal.title}</CardTitle>
-                    <Button size="sm" variant="outline">
-                      Update Progress
-                    </Button>
-                  </div>
-                  <Badge
-                    className={`inline-flex rounded-full text-xs font-semibold px-2 py-0.5 ${
-                      goal.status === "completed"
-                        ? "bg-green-500 text-white"
-                        : goal.status === "in-progress"
-                        ? "bg-gradient-to-r from-yellow-400 to-orange-500 text-white"
-                        : "bg-gradient-to-r from-blue-400 to-indigo-500 text-white"
-                    }`}
-                  >
-                    {goal.status}
-                  </Badge>
-                </CardHeader>
-                <CardContent>
-                  <div className="flex justify-between text-sm mb-2">
-                    <span>Progress</span>
-                    <span>{goal.progress}%</span>
-                  </div>
-                  <Progress
-                    value={goal.progress}
-                    className="h-3 rounded-full bg-white/30"
-                    style={{ background: "linear-gradient(to right, #3b82f6, #6366f1)" }}
-                  />
-                  <div className="flex justify-between text-sm text-muted-foreground mt-2">
-                    <span>Deadline: {goal.deadline}</span>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </TabsContent>
+  {/* Goals List */}
+{goals.map((goal) => (
+  <Card key={goal._id} className="bg-white/90 shadow-lg hover:shadow-xl transition">
+    <CardHeader className="flex flex-col items-start space-y-2">
+      <div className="flex justify-between w-full items-start">
+        <CardTitle className="text-left">{goal.title}</CardTitle>
+        <div className="flex space-x-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setOpenUpdate({ open: true, goal })}
+          >
+            Update Progress
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() => setDeleteDialog({ open: true, goalId: goal._id })}
+          >
+            Delete
+          </Button>
+        </div>
+      </div>
+      <Badge
+        className={`inline-flex rounded-full text-xs font-semibold px-2 py-0.5 ${
+          goal.status === "completed"
+            ? "bg-green-500 text-white"
+            : goal.status === "in-progress"
+            ? "bg-gradient-to-r from-yellow-400 to-orange-500 text-white"
+            : "bg-gradient-to-r from-blue-400 to-indigo-500 text-white"
+        }`}
+      >
+        {goal.status}
+      </Badge>
+    </CardHeader>
+
+    <CardContent>
+      <div className="flex justify-between text-sm mb-2">
+        <span>Progress</span>
+        <span>{goal.progress}%</span>
+      </div>
+      <Progress
+        value={goal.progress}
+        className="h-3 rounded-full bg-white/30"
+        style={{ background: "linear-gradient(to right, #3b82f6, #6366f1)" }}
+      />
+      <div className="flex justify-between text-sm text-muted-foreground mt-2">
+        <span>Deadline: {new Date(goal.deadline).toLocaleDateString()}</span>
+      </div>
+    </CardContent>
+  </Card>
+))}
+
+  {/* Create Goal Dialog */}
+  <Dialog open={openCreate} onOpenChange={setOpenCreate}>
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Create New Goal</DialogTitle>
+      </DialogHeader>
+      <Input
+        placeholder="Title"
+        value={newGoal.title}
+        onChange={(e) =>
+          setNewGoal({ ...newGoal, title: e.target.value })
+        }
+      />
+      <Textarea
+        placeholder="Description"
+        value={newGoal.description}
+        onChange={(e) =>
+          setNewGoal({ ...newGoal, description: e.target.value })
+        }
+      />
+      <Input
+        type="date"
+        value={newGoal.deadline}
+        onChange={(e) =>
+          setNewGoal({ ...newGoal, deadline: e.target.value })
+        }
+      />
+      <DialogFooter>
+        <Button
+          onClick={createGoal}
+          className="bg-green-600 hover:bg-green-700 text-white"
+        >
+          Save Goal
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  {/* Update Progress Dialog */}
+  <Dialog
+    open={openUpdate.open}
+    onOpenChange={(val) =>
+      setOpenUpdate({ open: val, goal: openUpdate.goal })
+    }
+  >
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Update Progress</DialogTitle>
+      </DialogHeader>
+      {openUpdate.goal && (
+        <>
+          <p className="text-sm mb-2">Goal: {openUpdate.goal.title}</p>
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            value={progress}
+            onChange={(e) => setProgress(Number(e.target.value))}
+          />
+          <DialogFooter>
+            <Button
+              onClick={() => updateProgress(openUpdate.goal._id)}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              Update
+            </Button>
+          </DialogFooter>
+        </>
+      )}
+    </DialogContent>
+  </Dialog>
+
+  <Dialog
+  open={deleteDialog.open}
+  onOpenChange={(val) => setDeleteDialog({ ...deleteDialog, open: val })}
+>
+  <DialogContent>
+    <DialogHeader>
+      <DialogTitle>Confirm Delete</DialogTitle>
+    </DialogHeader>
+    <p className="my-4 text-sm">
+      Are you sure you want to delete this goal? This action cannot be undone.
+    </p>
+    <DialogFooter className="flex justify-end space-x-2">
+      <Button
+        variant="outline"
+        onClick={() => setDeleteDialog({ open: false, goalId: null })}
+      >
+        Cancel
+      </Button>
+      <Button
+        variant="destructive"
+        onClick={() => {
+          if (deleteDialog.goalId) deleteGoal(deleteDialog.goalId)
+          setDeleteDialog({ open: false, goalId: null })
+        }}
+      >
+        Delete
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+</TabsContent>
 
           {/* Leaves Tab */}
           <TabsContent value="leaves" className="space-y-6">
@@ -537,27 +713,6 @@ export default function EmployeeDashboard() {
               </CardContent>
             </Card>
 
-            {/* Leave Balance Card */}
-            <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
-              <CardHeader>
-                <CardTitle>Leave Balance</CardTitle>
-                <CardDescription>Your remaining leave days for this year</CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {[
-                  { count: leaveBalance.vacation ?? 0, label: "Vacation Days", color: "text-blue-600" },
-                  { count: leaveBalance.sick ?? 0, label: "Sick Days", color: "text-green-600" },
-                  { count: leaveBalance.personal ?? 0, label: "Personal Days", color: "text-purple-600" },
-                  { count: leaveBalance.emergency ?? 0, label: "Emergency Days", color: "text-orange-600" },
-                ].map((item, idx) => (
-                  <div key={idx} className="text-left p-4 border rounded-lg">
-                    <div className={`text-2xl font-bold ${item.color}`}>{item.count}</div>
-                    <p className="text-sm text-muted-foreground">{item.label}</p>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-
             {/* Leave History / Status Card */}
             <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
               <CardHeader>
@@ -565,8 +720,7 @@ export default function EmployeeDashboard() {
                 <CardDescription>Track your leave requests and their approval status</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
-                {leaveHistory.length === 0 && <p className="text-sm text-muted-foreground">No leave requests yet.</p>}
-                {leaveHistory.map((leave, idx) => (
+                {leaveData.map((leave, idx) => (
                   <Card key={idx} className="p-3 shadow-sm border rounded-lg flex justify-between items-center">
                     <div>
                       <p className="font-medium">{leave.type}</p>
@@ -584,7 +738,7 @@ export default function EmployeeDashboard() {
                       }`}
                       aria-label={`Leave status: ${leave.status}`}
                     >
-                      {String(leave.status).toUpperCase()}
+                      {leave.status.toUpperCase()}
                     </Badge>
                   </Card>
                 ))}
@@ -593,120 +747,130 @@ export default function EmployeeDashboard() {
           </TabsContent>
 
           {/* Salary Tab */}
-          <TabsContent value="salary" className="space-y-6">
-            {/* Salary Information */}
-            <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
-              <CardHeader>
-                <CardTitle>Salary Information</CardTitle>
-                <CardDescription>Your current salary details and employee info</CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-2 gap-4">
-                {Object.entries({
-                  "Employee ID": employeeData.id,
-                  "Full Name": employeeData.name,
-                  "Position": employeeData.position,
-                  "Department": employeeData.department,
-                  "Base Salary": `Rs.${employeeData.salary?.toLocaleString?.() ?? employeeData.salary}`,
-                  "Join Date": employeeData.joinDate,
-                }).map(([label, value], idx) => (
-                  <div key={idx}>
-                    <Label className="text-sm font-medium text-muted-foreground">{label}</Label>
-                    <p className="text-lg font-semibold">{value}</p>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+<TabsContent value="salary" className="space-y-6">
+  {/* Salary Information */}
+<Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
+  <CardHeader>
+    <CardTitle>Salary Information</CardTitle>
+    <CardDescription>Your current salary details and employee info</CardDescription>
+  </CardHeader>
+  <CardContent className="grid grid-cols-2 gap-4">
+  {Object.entries({
+    "Employee ID": employeeData?.employeeId,
+    "Full Name": employeeData?.name,
+    "Position": employeeData?.position,
+    "Department": employeeData?.department,
+    "Base Salary": payrollData[0]?.base != null ? `Rs.${payrollData[0].base.toLocaleString()}` : "Rs.0",
+    "Bonus": payrollData[0]?.bonus != null ? `Rs.${payrollData[0].bonus.toLocaleString()}` : "Rs.0",
+    "Deductions":payrollData[0]?.deductions != null ? `Rs.${payrollData[0].deductions.toLocaleString()}` : "Rs.0",
+    "Net Salary": payrollData[0]?.net != null ? `Rs.${payrollData[0].net.toLocaleString()}` : "Rs.0",
+    "Join Date": employeeData?.joinedOn ? new Date(employeeData.joinedOn).toLocaleDateString() : "N/A",
+  }).map(([label, value], idx) => (
+    <div key={idx}>
+      <Label className="text-sm font-medium text-muted-foreground">{label}</Label>
+      <p className="text-lg font-semibold">{value}</p>
+    </div>
+  ))}
+</CardContent>
+</Card>
 
-            {/* Salary Breakdown */}
-            <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
-              <CardHeader>
-                <CardTitle>Salary Breakdown</CardTitle>
-                <CardDescription>Details of your earnings and deductions</CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {/* If salaryHistory or payroll breakdown available from backend, map it here */}
-                <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-center">
-                  <p className="text-sm text-gray-500">Base Salary</p>
-                  <p className="text-lg font-semibold text-gray-800">Rs.{employeeData.salary?.toLocaleString?.() ?? employeeData.salary}</p>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-center">
-                  <p className="text-sm text-gray-500">Bonus</p>
-                  <p className="text-lg font-semibold text-gray-800">Rs.5,000</p>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-center">
-                  <p className="text-sm text-gray-500">Deductions</p>
-                  <p className="text-lg font-semibold text-gray-800">Rs.1,200</p>
-                </div>
-                <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-center">
-                  <p className="text-sm text-gray-500">Net Salary</p>
-                  <p className="text-lg font-semibold text-gray-800">Rs.{(Number(employeeData.salary || 0) + 5000 - 1200).toLocaleString()}</p>
-                </div>
-              </CardContent>
-            </Card>
+  {/* Salary Breakdown */}
+{payrollData.map((pay) => (
+  <Card
+    key={pay._id}
+    className="bg-white/90 shadow-lg hover:shadow-xl transition"
+  >
+    
+    <CardHeader>
+      <CardTitle>Salary Breakdown - {pay.period}</CardTitle>
+      <CardDescription>Details of your earnings and deductions</CardDescription>
+    </CardHeader>
+    <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {[
+        { label: "Gross Salary", value: `Rs.${((pay.base || 0) + (pay.bonus || 0)).toLocaleString()}` },
+        { label: "Bonus", value: `Rs.${pay.bonus?.toLocaleString() || 0}` },
+        { label: "Deductions", value:`Rs.${pay.deductions?.toLocaleString() || 0}` },
+        { label: "Net Salary", value: `Rs.${pay.net?.toLocaleString() || 0}` },
+        { label: "Status", value: pay.status },
+      ].map((item, idx) => (
+        <div key={idx} className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-center">
+          <p className="text-sm text-gray-500">{item.label}</p>
+          <p className="text-lg font-semibold text-gray-800">{item.value}</p>
+        </div>
+      ))}
+      {/* ✅ Button placed after loop */}
+      <div className="col-span-2 md:col-span-4 flex justify-center mt-4">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() =>
+            generatePayslip(pay, pay.processedBy || "HR Admin")
+          }
+        >
+          <FileText className="h-4 w-4 mr-1" />
+          Download Payslip
+        </Button>
+      </div>
+    </CardContent>
+  </Card>
+))}
 
-            {/* Salary Payment Status */}
-            <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
-              <CardHeader>
-                <CardTitle>Salary Payment Status</CardTitle>
-                <CardDescription>Track your recent salary payments</CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {salaryHistory.length === 0 && <p className="text-sm text-muted-foreground">No payment records found.</p>}
-                {salaryHistory.map((pay: any, idx: number) => (
-                  <div
-                    key={idx}
-                    className={`p-4 rounded-lg border flex justify-between items-center transition ${
-                      pay.status === "Paid" ? "bg-green-50 border-green-200" : "bg-yellow-50 border-yellow-200"
-                    }`}
-                  >
-                    <div>
-                      <p className="font-medium">{pay.month || pay.period}</p>
-                      <p className="text-sm text-muted-foreground">Amount: Rs.{pay.amount}</p>
-                      <p className="text-sm text-muted-foreground">Paid on: {pay.date || pay.paidAt?.split?.("T")?.[0]}</p>
-                    </div>
-                    <div>
-                      {pay.status === "Paid" ? (
-                        <CheckCircle className="h-6 w-6 text-green-500" />
-                      ) : (
-                        <Clock className="h-6 w-6 text-yellow-500" />
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+  {/* Salary Payment Status */}
+  <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
+  <CardHeader>
+    <CardTitle>Salary Payment Status</CardTitle>
+    <CardDescription>Track your recent salary payments</CardDescription>
+  </CardHeader>
+  <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
+    {payrollData.map((pay) => (
+      <div
+        key={pay._id}
+        className={`p-4 rounded-lg border flex justify-between items-center transition ${
+          pay.status === "paid" ? "bg-green-50 border-green-200" : "bg-yellow-50 border-yellow-200"
+        }`}
+      >
+        <div>
+          <p className="font-medium">{pay.period}</p>
+          <p className="text-sm text-muted-foreground">Net: Rs.{pay.net?.toLocaleString()}</p>
+          <p className="text-sm text-muted-foreground">Status: {pay.status}</p>
+        </div>
+        <div>
+          {pay.status === "paid" ? (
+            <CheckCircle className="h-6 w-6 text-green-500" />
+          ) : (
+            <Clock className="h-6 w-6 text-yellow-500" />
+          )}
+        </div>
+      </div>
+    ))}
+  </CardContent>
+</Card>
 
-            {/* Recent Feedback */}
+          {/* Recent Feedback */}
             <Card className="bg-white/90 shadow-lg hover:shadow-xl transition">
-              <CardHeader>
-                <CardTitle>Recent Feedback</CardTitle>
-                <CardDescription>Feedback from your manager and HR</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {feedbackData.length === 0 && <p className="text-sm text-muted-foreground">No feedback yet.</p>}
-                {feedbackData.map((feedback) => (
-                  <div
-                    key={feedback.id || feedback._id}
-                    className="p-4 border border-gray-200 rounded-lg bg-gray-50 hover:bg-gray-100 transition"
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-semibold text-gray-800">{feedback.sender || feedback.fromName || "HR"}</span>
-                      <span className="text-xs text-gray-500">{feedback.date || feedback.createdAt?.split?.("T")?.[0]}</span>
-                    </div>
-                    <p className="text-sm text-gray-700">{feedback.message || feedback.text}</p>
-                  </div>
-                ))}
-
-                {/* Submit feedback input */}
-                <div className="mt-4">
-                  <Label>Send Feedback / Request</Label>
-                  <Textarea value={feedbackInput} onChange={(e) => setFeedbackInput(e.target.value)} placeholder="Write your feedback or request..." />
-                  <div className="mt-2">
-                    <Button onClick={() => { submitFeedback(feedbackInput); setFeedbackInput(""); }}>Send</Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+  <CardHeader>
+    <CardTitle>Recent Feedback</CardTitle>
+    <CardDescription>Feedback from your Admin and HR</CardDescription>
+  </CardHeader>
+  <CardContent className="space-y-4">
+    {feedbackData.length === 0 ? (
+      <p className="text-sm text-gray-500">No feedback available</p>
+    ) : (
+      feedbackData.map((feedback) => (
+        <div
+          key={feedback.id}
+          className="p-4 border border-gray-200 rounded-lg bg-gray-50 hover:bg-gray-100 transition"
+        >
+          <div className="flex items-center justify-between mb-1">
+            <span className="font-semibold text-gray-800">{feedback.sender}</span>
+            <span className="text-xs text-gray-500">{feedback.date}</span>
+          </div>
+          <p className="text-sm text-gray-700">{feedback.message}</p>
+        </div>
+      ))
+    )}
+  </CardContent>
+</Card>
           </TabsContent>
         </Tabs>
       </div>
